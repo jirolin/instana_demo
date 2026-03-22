@@ -11,26 +11,33 @@
     - name: Log all Instana events
       condition: event.payload is defined
       action:
-        run_playbook:
-          name: playbooks/log-event.yml
+        run_job_template:
+          name: log-event
+          organization: Default
 
     # Standard: process down -> restart
     - name: Process down - restart service
       condition: event.payload.message is match(".*process.*down.*", ignorecase=true)
       action:
-        run_playbook:
-          name: playbooks/notify-event.yml
-          extra_vars:
-            action_type: restart_service
+        run_job_template:
+          name: restart-service
+          organization: Default
+          job_args:
+            extra_vars:
+              target_host: "{{ event.payload.host }}"
+              service_name: "{{ event.payload.service }}"
+              event_id: "{{ event.payload.id }}"
 
     # Standard: disk usage high
-    - name: Disk usage high - alert
+    - name: Disk usage high - cleanup
       condition: event.payload.message is match(".*disk.*usage.*", ignorecase=true)
       action:
-        run_playbook:
-          name: playbooks/notify-event.yml
-          extra_vars:
-            action_type: disk_cleanup
+        run_job_template:
+          name: disk-cleanup
+          organization: Default
+          job_args:
+            extra_vars:
+              target_host: "{{ event.payload.host }}"
 
     # AI-Driven: performance degradation
     - name: Performance degradation - AI analysis
@@ -39,7 +46,10 @@
         or event.payload.message is match(".*response time.*", ignorecase=true)
         or event.payload.message is match(".*high latency.*", ignorecase=true)
       action:
-        run_playbook:
-          name: playbooks/notify-event.yml
-          extra_vars:
-            action_type: ai_analysis
+        run_job_template:
+          name: ai-analyze-and-remediate
+          organization: Default
+          job_args:
+            extra_vars:
+              event_data: "{{ event.payload | to_json }}"
+              analysis_mode: "auto"
