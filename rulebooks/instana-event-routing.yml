@@ -16,7 +16,7 @@
           organization: Default
           job_args:
             extra_vars:
-              event_payload: "{{ event.payload | to_json }}"
+              event_payload: "{{ event.payload }}"
 
     # Standard: process down -> restart
     - name: Process down - restart service
@@ -54,5 +54,5 @@
           organization: Default
           job_args:
             extra_vars:
-              event_data: "{{ event.payload | to_json }}"
+              event_data: "{{ event.payload }}"
               analysis_mode: "auto"
