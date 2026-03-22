@@ -14,6 +14,9 @@
         run_job_template:
           name: log-event
           organization: Default
+          job_args:
+            extra_vars:
+              event_payload: "{{ event.payload | to_json }}"
 
     # Standard: process down -> restart
     - name: Process down - restart service
