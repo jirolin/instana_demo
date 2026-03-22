@@ -1,5 +1,5 @@
 ---
 collections:
   - name: ibm.instana
-    version: ">=1.0.32"
+    version: ">=1.0.24"
   - name: ansible.eda
