@@ -1,0 +1,31 @@
+---
+- name: Notify and Route Instana Event
+  hosts: localhost
+  gather_facts: false
+  connection: local
+
+  vars:
+    action_type: "{{ action_type | default('unknown') }}"
+
+  tasks:
+    - name: Display event routing decision
+      ansible.builtin.debug:
+        msg: >
+          [EVENT ROUTED]
+          Action: {{ action_type }}
+          Event: {{ ansible_eda.event.payload | default({}) | to_nice_json }}
+
+    - name: Log restart action
+      ansible.builtin.debug:
+        msg: "[ACTION] restart_service triggered for {{ ansible_eda.event.payload.host | default('unknown') }}"
+      when: action_type == "restart_service"
+
+    - name: Log disk cleanup action
+      ansible.builtin.debug:
+        msg: "[ACTION] disk_cleanup triggered for {{ ansible_eda.event.payload.host | default('unknown') }}"
+      when: action_type == "disk_cleanup"
+
+    - name: Log AI analysis action
+      ansible.builtin.debug:
+        msg: "[ACTION] ai_analysis triggered - event forwarded for AI judgment"
+      when: action_type == "ai_analysis"

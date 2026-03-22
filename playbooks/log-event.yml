@@ -1,0 +1,12 @@
+---
+- name: Log Instana Event
+  hosts: localhost
+  gather_facts: false
+  connection: local
+
+  tasks:
+    - name: Display received event
+      ansible.builtin.debug:
+        msg: >
+          [INSTANA EVENT RECEIVED]
+          Payload: {{ ansible_eda.event.payload | default('No payload') | to_nice_json }}
