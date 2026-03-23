@@ -13,12 +13,9 @@
     event_id: "{{ event_id | default('') }}"
     event_text: "{{ event_text | default('Unknown event') }}"
     event_severity: "{{ event_severity | default('') }}"
-    event_state: "{{ event_state | default('') }}"
     event_entity: "{{ event_entity | default('') }}"
     event_fqdn: "{{ event_fqdn | default('') }}"
     event_service: "{{ event_service | default('') }}"
-    event_suggestion: "{{ event_suggestion | default('') }}"
-    event_link: "{{ event_link | default('') }}"
     analysis_mode: "{{ analysis_mode | default('auto') }}"
     dashboard_url: "{{ lookup('env', 'DASHBOARD_URL') | default('http://localhost:9180', true) }}"
     # OpenAI ChatGPT API
@@ -36,13 +33,10 @@
           id: "{{ event_id }}"
           text: "{{ event_text }}"
           severity: "{{ event_severity }}"
-          state: "{{ event_state }}"
           entityLabel: "{{ event_entity }}"
           fqdn: "{{ event_fqdn }}"
           host: "{{ event_fqdn }}"
           service: "{{ event_service }}"
-          suggestion: "{{ event_suggestion }}"
-          link: "{{ event_link }}"
 
     - name: Display event info
       ansible.builtin.debug:
@@ -53,7 +47,6 @@
           ID:         {{ instana_event.id }}
           Text:       {{ instana_event.text }}
           Severity:   {{ instana_event.severity }}
-          State:      {{ instana_event.state }}
           Entity:     {{ instana_event.entityLabel }}
           Host:       {{ instana_event.fqdn }}
           Service:    {{ instana_event.service }}
@@ -108,7 +101,7 @@
           {% endfor %}
           {% endif %}
           ### Instana推奨対処
-          {{ instana_event.suggestion | default('なし') }}
+          なし
       ignore_errors: true
 
     # --- Phase 4: Update dashboard status to analyzing ---
@@ -151,12 +144,9 @@
                 - ID: {{ instana_event.id }}
                 - テキスト: {{ instana_event.text }}
                 - 重要度: {{ instana_event.severity }}
-                - 状態: {{ instana_event.state }}
                 - エンティティ: {{ instana_event.entityLabel }}
                 - ホスト: {{ instana_event.fqdn }}
                 - サービス: {{ instana_event.service }}
-                - Instana推奨: {{ instana_event.suggestion }}
-                - リンク: {{ instana_event.link }}
 
                 {{ instana_context | default('') }}
 
