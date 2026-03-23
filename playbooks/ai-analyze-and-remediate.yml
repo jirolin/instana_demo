@@ -9,9 +9,18 @@
   gather_facts: false
 
   vars:
-    event_data: "{{ event_data | default('{}') }}"
+    # EDA から個別フィールドで渡される変数
+    event_id: "{{ event_id | default('') }}"
+    event_text: "{{ event_text | default('Unknown event') }}"
+    event_severity: "{{ event_severity | default('') }}"
+    event_state: "{{ event_state | default('') }}"
+    event_entity: "{{ event_entity | default('') }}"
+    event_fqdn: "{{ event_fqdn | default('') }}"
+    event_service: "{{ event_service | default('') }}"
+    event_suggestion: "{{ event_suggestion | default('') }}"
+    event_link: "{{ event_link | default('') }}"
     analysis_mode: "{{ analysis_mode | default('auto') }}"
-    dashboard_url: "{{ lookup('env', 'DASHBOARD_URL') | default('http://localhost:3000', true) }}"
+    dashboard_url: "{{ lookup('env', 'DASHBOARD_URL') | default('http://localhost:9180', true) }}"
     # OpenAI ChatGPT API
     openai_api_url: "https://api.openai.com/v1/chat/completions"
     openai_api_key: "{{ lookup('env', 'OPENAI_API_KEY') }}"
@@ -20,10 +29,36 @@
     instana_api_token: "{{ lookup('env', 'INSTANA_API_TOKEN') }}"
 
   tasks:
-    # --- Phase 1: イベントパース ---
-    - name: Parse event data
+    # --- Phase 1: イベントデータを構造化 ---
+    - name: Build instana_event from individual fields
       ansible.builtin.set_fact:
-        instana_event: "{{ event_data | from_json }}"
+        instana_event:
+          id: "{{ event_id }}"
+          text: "{{ event_text }}"
+          severity: "{{ event_severity }}"
+          state: "{{ event_state }}"
+          entityLabel: "{{ event_entity }}"
+          fqdn: "{{ event_fqdn }}"
+          host: "{{ event_fqdn }}"
+          service: "{{ event_service }}"
+          suggestion: "{{ event_suggestion }}"
+          link: "{{ event_link }}"
+
+    - name: Display event info
+      ansible.builtin.debug:
+        msg: |
+          ========================================
+          Instana Event Received
+          ========================================
+          ID:         {{ instana_event.id }}
+          Text:       {{ instana_event.text }}
+          Severity:   {{ instana_event.severity }}
+          State:      {{ instana_event.state }}
+          Entity:     {{ instana_event.entityLabel }}
+          Host:       {{ instana_event.fqdn }}
+          Service:    {{ instana_event.service }}
+          Mode:       {{ analysis_mode }}
+          ========================================
 
     # --- Phase 2: ダッシュボードにイベント登録 ---
     - name: Register event to dashboard
@@ -32,12 +67,12 @@
         method: POST
         body_format: json
         body:
-          instana_event_id: "{{ instana_event.id | default('') }}"
-          severity: "{{ instana_event.severity | default('warning') | lower }}"
-          category: "{{ instana_event.type | default('application') | lower }}"
-          message: "{{ instana_event.text | default(instana_event.problem | default('Unknown event')) }}"
-          host: "{{ instana_event.host | default('') }}"
-          service: "{{ instana_event.service | default('') }}"
+          instana_event_id: "{{ instana_event.id }}"
+          severity: "{{ instana_event.severity }}"
+          category: "application"
+          message: "{{ instana_event.text }}"
+          host: "{{ instana_event.fqdn }}"
+          service: "{{ instana_event.service }}"
           mode: "{{ analysis_mode }}"
         status_code: [200, 201]
       register: dashboard_event
@@ -61,20 +96,6 @@
       when: instana_api_token | length > 0
       ignore_errors: true
 
-    - name: Fetch infrastructure metrics from Instana
-      ansible.builtin.uri:
-        url: "{{ instana_api_url }}/infrastructure-monitoring/snapshots?query=entity.host.name:{{ instana_event.host | default('*') }}&size=5"
-        method: GET
-        headers:
-          Authorization: "apiToken {{ instana_api_token }}"
-        return_content: true
-        status_code: [200]
-      register: instana_infra
-      when:
-        - instana_api_token | length > 0
-        - instana_event.host is defined
-      ignore_errors: true
-
     - name: Build Instana context
       ansible.builtin.set_fact:
         instana_context: |
@@ -86,10 +107,8 @@
           - {{ evt.text | default('N/A') }} ({{ evt.severity | default('?') }})
           {% endfor %}
           {% endif %}
-          {% if instana_infra is succeeded and instana_infra.json is defined %}
-          ### インフラ情報
-          {{ instana_infra.json | to_nice_json }}
-          {% endif %}
+          ### Instana推奨対処
+          {{ instana_event.suggestion | default('なし') }}
       ignore_errors: true
 
     # --- Phase 4: Update dashboard status to analyzing ---
@@ -129,7 +148,15 @@
                 以下のInstana APMアラートを分析し、JSON形式で回答してください。
 
                 ## アラート情報
-                {{ instana_event | to_nice_json }}
+                - ID: {{ instana_event.id }}
+                - テキスト: {{ instana_event.text }}
+                - 重要度: {{ instana_event.severity }}
+                - 状態: {{ instana_event.state }}
+                - エンティティ: {{ instana_event.entityLabel }}
+                - ホスト: {{ instana_event.fqdn }}
+                - サービス: {{ instana_event.service }}
+                - Instana推奨: {{ instana_event.suggestion }}
+                - リンク: {{ instana_event.link }}
 
                 {{ instana_context | default('') }}
 
@@ -190,7 +217,7 @@
         body_format: json
         body:
           root_cause: "{{ ai_decision.root_cause | default('Analysis unavailable') }}"
-          evidence: "{{ ai_decision.evidence | default([]) | to_json }}"
+          evidence: "{{ ai_decision.evidence | default([]) }}"
           confidence: "{{ ai_decision.confidence | default(0.5) }}"
         status_code: [200, 201]
       when:
@@ -231,20 +258,11 @@
         - not ai_decision.requires_human
         - analysis_mode == "auto"
 
-    - name: Auto-execute scale-out action
-      ansible.builtin.debug:
-        msg: "ACTION: Would scale out {{ ai_decision.action_params.target }} (dry-run in PoC)"
-      when:
-        - ai_decision is defined
-        - ai_decision.recommended_action == "scale_out"
-        - not ai_decision.requires_human
-        - analysis_mode == "auto"
-
     - name: Await human approval (approval mode)
       ansible.builtin.debug:
         msg: |
           APPROVAL MODE: Proposals posted to dashboard.
-          Operator must approve via dashboard at {{ dashboard_url }}/events/{{ dashboard_event_id }}
+          Operator must approve via dashboard at {{ dashboard_url }}/events/{{ dashboard_event_id | default('') }}
       when:
         - ai_decision is defined
         - analysis_mode == "approval"
