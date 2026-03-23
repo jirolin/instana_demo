@@ -1,0 +1,67 @@
+---
+- name: Disk Cleanup on Target Host
+  hosts: "{{ target_host | default('localhost') }}"
+  gather_facts: true
+
+  vars:
+    threshold_percent: 85
+    log_retention_days: 7
+    tmp_retention_days: 3
+    cleanup_paths:
+      - { path: "/var/log", pattern: "*.log.*", days: "{{ log_retention_days }}" }
+      - { path: "/var/log", pattern: "*.gz", days: "{{ log_retention_days }}" }
+      - { path: "/tmp", pattern: "*", days: "{{ tmp_retention_days }}" }
+      - { path: "/var/tmp", pattern: "*", days: "{{ tmp_retention_days }}" }
+
+  tasks:
+    - name: Check current disk usage
+      ansible.builtin.command: df -h /
+      register: disk_before
+      changed_when: false
+
+    - name: Display current disk usage
+      ansible.builtin.debug:
+        msg: |
+          [DISK CLEANUP] Target: {{ target_host }}
+          Before cleanup:
+          {{ disk_before.stdout }}
+
+    - name: Remove old log files
+      ansible.builtin.find:
+        paths: "{{ item.path }}"
+        patterns: "{{ item.pattern }}"
+        age: "{{ item.days }}d"
+        recurse: true
+      register: old_files
+      loop: "{{ cleanup_paths }}"
+
+    - name: Delete found old files
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ old_files.results | map(attribute='files') | flatten }}"
+      loop_control:
+        label: "{{ item.path }}"
+      when: old_files.results | map(attribute='files') | flatten | length > 0
+
+    - name: Clean package manager cache
+      ansible.builtin.command: dnf clean all
+      changed_when: true
+      ignore_errors: true
+
+    - name: Remove old journal logs
+      ansible.builtin.command: journalctl --vacuum-time=7d
+      changed_when: true
+      ignore_errors: true
+
+    - name: Check disk usage after cleanup
+      ansible.builtin.command: df -h /
+      register: disk_after
+      changed_when: false
+
+    - name: Report result
+      ansible.builtin.debug:
+        msg: |
+          [RESULT] Disk cleanup completed on {{ target_host }}
+          After cleanup:
+          {{ disk_after.stdout }}

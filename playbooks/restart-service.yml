@@ -1,0 +1,50 @@
+---
+- name: Restart Service on Target Host
+  hosts: "{{ target_host | default('localhost') }}"
+  gather_facts: false
+
+  vars:
+    service_name: "{{ service_name | default('') }}"
+    event_id: "{{ event_id | default('unknown') }}"
+
+  tasks:
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - service_name | length > 0
+          - target_host | length > 0
+        fail_msg: "service_name and target_host are required"
+
+    - name: Log restart attempt
+      ansible.builtin.debug:
+        msg: >
+          [RESTART] Event ID: {{ event_id }}
+          - Target: {{ target_host }}
+          - Service: {{ service_name }}
+
+    - name: Restart the service
+      ansible.builtin.systemd:
+        name: "{{ service_name }}"
+        state: restarted
+      register: restart_result
+
+    - name: Wait for service to stabilize
+      ansible.builtin.pause:
+        seconds: 5
+
+    - name: Verify service is running
+      ansible.builtin.systemd:
+        name: "{{ service_name }}"
+      register: service_status
+
+    - name: Report result
+      ansible.builtin.debug:
+        msg: >
+          [RESULT] Service {{ service_name }} on {{ target_host }}:
+          Status={{ service_status.status.ActiveState | default('unknown') }}
+          (Event ID: {{ event_id }})
+
+    - name: Fail if service did not start
+      ansible.builtin.fail:
+        msg: "Service {{ service_name }} failed to restart. Status: {{ service_status.status.ActiveState | default('unknown') }}"
+      when: service_status.status.ActiveState | default('') != 'active'
