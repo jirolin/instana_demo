@@ -2,32 +2,109 @@
 # AI判断 + 自動対処 Playbook
 # Instana イベントデータを ChatGPT API (gpt-4o) に送り、
 # 根本原因分析と最適な対処方針を取得して実行する
+# 追加: Instana APIから補足データを収集し、AIにコンテキストを提供
+# 追加: ダッシュボードへの結果通知
 - name: AI-Driven Analysis and Remediation
   hosts: localhost
   gather_facts: false
-  connection: local
 
   vars:
     event_data: "{{ event_data | default('{}') }}"
     analysis_mode: "{{ analysis_mode | default('auto') }}"
+    dashboard_url: "{{ lookup('env', 'DASHBOARD_URL') | default('http://localhost:3000', true) }}"
+    # OpenAI ChatGPT API
     openai_api_url: "https://api.openai.com/v1/chat/completions"
     openai_api_key: "{{ lookup('env', 'OPENAI_API_KEY') }}"
-    openai_model: "gpt-4o"
+    # Instana API（追加データ収集用）
+    instana_api_url: "https://tech-nicp.instana.io/api"
+    instana_api_token: "{{ lookup('env', 'INSTANA_API_TOKEN') }}"
 
   tasks:
-    # ---- Phase 1: イベントデータ解析 ----
+    # --- Phase 1: イベントパース ---
     - name: Parse event data
       ansible.builtin.set_fact:
-        instana_event: "{{ event_data if event_data is mapping else (event_data | from_json) }}"
+        instana_event: "{{ event_data | from_json }}"
 
-    - name: Log incoming event
-      ansible.builtin.debug:
-        msg: |
-          [AI-DRIVEN] Event received for analysis
-          Mode: {{ analysis_mode }}
-          Event: {{ instana_event | to_nice_json }}
+    # --- Phase 2: ダッシュボードにイベント登録 ---
+    - name: Register event to dashboard
+      ansible.builtin.uri:
+        url: "{{ dashboard_url }}/api/events"
+        method: POST
+        body_format: json
+        body:
+          instana_event_id: "{{ instana_event.id | default('') }}"
+          severity: "{{ instana_event.severity | default('warning') | lower }}"
+          category: "{{ instana_event.type | default('application') | lower }}"
+          message: "{{ instana_event.text | default(instana_event.problem | default('Unknown event')) }}"
+          host: "{{ instana_event.host | default('') }}"
+          service: "{{ instana_event.service | default('') }}"
+          mode: "{{ analysis_mode }}"
+        status_code: [200, 201]
+      register: dashboard_event
+      ignore_errors: true
 
-    # ---- Phase 2: ChatGPT API で根本原因分析 ----
+    - name: Set dashboard event ID
+      ansible.builtin.set_fact:
+        dashboard_event_id: "{{ dashboard_event.json.id | default('') }}"
+      when: dashboard_event is succeeded
+
+    # --- Phase 3: Instana APIから追加データ収集 ---
+    - name: Fetch recent events from Instana
+      ansible.builtin.uri:
+        url: "{{ instana_api_url }}/events?windowSize=3600000"
+        method: GET
+        headers:
+          Authorization: "apiToken {{ instana_api_token }}"
+        return_content: true
+        status_code: [200]
+      register: instana_recent_events
+      when: instana_api_token | length > 0
+      ignore_errors: true
+
+    - name: Fetch infrastructure metrics from Instana
+      ansible.builtin.uri:
+        url: "{{ instana_api_url }}/infrastructure-monitoring/snapshots?query=entity.host.name:{{ instana_event.host | default('*') }}&size=5"
+        method: GET
+        headers:
+          Authorization: "apiToken {{ instana_api_token }}"
+        return_content: true
+        status_code: [200]
+      register: instana_infra
+      when:
+        - instana_api_token | length > 0
+        - instana_event.host is defined
+      ignore_errors: true
+
+    - name: Build Instana context
+      ansible.builtin.set_fact:
+        instana_context: |
+          ## Instana追加データ
+          ### 直近1時間のイベント数: {{ (instana_recent_events.json | default([])) | length }}
+          {% if instana_recent_events is succeeded and instana_recent_events.json is defined %}
+          ### 関連イベント（最新5件）
+          {% for evt in (instana_recent_events.json | default([]))[:5] %}
+          - {{ evt.text | default('N/A') }} ({{ evt.severity | default('?') }})
+          {% endfor %}
+          {% endif %}
+          {% if instana_infra is succeeded and instana_infra.json is defined %}
+          ### インフラ情報
+          {{ instana_infra.json | to_nice_json }}
+          {% endif %}
+      ignore_errors: true
+
+    # --- Phase 4: Update dashboard status to analyzing ---
+    - name: Update dashboard event status to analyzing
+      ansible.builtin.uri:
+        url: "{{ dashboard_url }}/api/events/{{ dashboard_event_id }}"
+        method: PUT
+        body_format: json
+        body:
+          status: "analyzing"
+        status_code: [200]
+      when: dashboard_event_id is defined and dashboard_event_id | length > 0
+      ignore_errors: true
+
+    # --- Phase 5: ChatGPT API で分析 ---
     - name: Send event to ChatGPT API for analysis
       ansible.builtin.uri:
         url: "{{ openai_api_url }}"
@@ -37,125 +114,152 @@
           Content-Type: "application/json"
         body_format: json
         body:
-          model: "{{ openai_model }}"
+          model: "gpt-4o"
           temperature: 0.2
           response_format:
-            type: json_object
+            type: "json_object"
           messages:
             - role: system
               content: |
-                あなたはインフラ運用のエキスパートです。
-                IBM Instana APMからのアラートを分析し、根本原因の特定と最適な対処方針を判断してください。
-                必ず以下のJSON形式で回答してください。
+                あなたはインフラ運用のエキスパートAIです。
+                Instana APMのアラートを分析し、根本原因の特定と対処方針を決定します。
+                必ずJSON形式で回答してください。
             - role: user
               content: |
-                以下のInstana APMアラートを分析してください。
+                以下のInstana APMアラートを分析し、JSON形式で回答してください。
 
                 ## アラート情報
                 {{ instana_event | to_nice_json }}
+
+                {{ instana_context | default('') }}
 
                 ## 回答フォーマット（JSON）
                 {
                   "severity": "critical/high/medium/low",
                   "root_cause": "根本原因の分析（日本語）",
+                  "confidence": 0.0-1.0,
+                  "evidence": ["証拠1", "証拠2"],
                   "recommended_action": "restart_service/scale_out/adjust_config/disk_cleanup/escalate",
                   "action_params": {
-                    "target": "対象ホスト/サービス名",
-                    "details": "具体的な対処内容（日本語）"
+                    "target": "対象ホスト/サービス",
+                    "details": "具体的な対処内容"
                   },
-                  "requires_human": true または false,
-                  "confidence": 0.0〜1.0,
-                  "summary": "状況サマリー（日本語、2-3文）"
+                  "proposals": [
+                    {
+                      "title": "提案タイトル",
+                      "description": "詳細説明",
+                      "playbook_name": "restart-service/disk-cleanup/escalate",
+                      "risk_level": "low/medium/high",
+                      "priority": 1
+                    }
+                  ],
+                  "requires_human": true/false,
+                  "summary": "状況サマリー（日本語）"
                 }
         return_content: true
         status_code: 200
-        timeout: 30
       register: ai_response
       when: openai_api_key | length > 0
 
-    # ---- Phase 3: AI応答の解析 ----
     - name: Parse AI response
       ansible.builtin.set_fact:
-        ai_decision: "{{ ai_response.json.choices[0].message.content | from_json }}"
+        ai_decision: "{{ (ai_response.json.choices[0].message.content | from_json) }}"
       when: ai_response is defined and ai_response is not skipped
 
     - name: Display AI analysis result
       ansible.builtin.debug:
         msg: |
           ========================================
-          AI Analysis Result ({{ openai_model }})
+          AI Analysis Result (ChatGPT gpt-4o)
           ========================================
-          Severity:     {{ ai_decision.severity | default('unknown') }}
-          Root Cause:   {{ ai_decision.root_cause | default('N/A') }}
-          Action:       {{ ai_decision.recommended_action | default('N/A') }}
-          Target:       {{ ai_decision.action_params.target | default('N/A') }}
-          Details:      {{ ai_decision.action_params.details | default('N/A') }}
-          Confidence:   {{ ai_decision.confidence | default('N/A') }}
+          Severity:    {{ ai_decision.severity | default('unknown') }}
+          Confidence:  {{ ai_decision.confidence | default('N/A') }}
+          Root Cause:  {{ ai_decision.root_cause | default('N/A') }}
+          Action:      {{ ai_decision.recommended_action | default('N/A') }}
+          Summary:     {{ ai_decision.summary | default('N/A') }}
           Human Needed: {{ ai_decision.requires_human | default(true) }}
-          Summary:      {{ ai_decision.summary | default('N/A') }}
+          Proposals:   {{ ai_decision.proposals | default([]) | length }}
           ========================================
       when: ai_decision is defined
 
-    # ---- Phase 4: AI判断に基づくアクション分岐 ----
-    - name: Execute restart action
+    # --- Phase 6: ダッシュボードにAI分析結果を送信 ---
+    - name: Post analysis to dashboard
+      ansible.builtin.uri:
+        url: "{{ dashboard_url }}/api/events/{{ dashboard_event_id }}/analysis"
+        method: POST
+        body_format: json
+        body:
+          root_cause: "{{ ai_decision.root_cause | default('Analysis unavailable') }}"
+          evidence: "{{ ai_decision.evidence | default([]) | to_json }}"
+          confidence: "{{ ai_decision.confidence | default(0.5) }}"
+        status_code: [200, 201]
+      when:
+        - dashboard_event_id is defined and dashboard_event_id | length > 0
+        - ai_decision is defined
+      ignore_errors: true
+
+    - name: Post proposals to dashboard
+      ansible.builtin.uri:
+        url: "{{ dashboard_url }}/api/events/{{ dashboard_event_id }}/proposals"
+        method: POST
+        body_format: json
+        body:
+          proposals: "{{ ai_decision.proposals | default([]) }}"
+        status_code: [200, 201]
+      when:
+        - dashboard_event_id is defined and dashboard_event_id | length > 0
+        - ai_decision is defined
+        - ai_decision.proposals is defined
+      ignore_errors: true
+
+    # --- Phase 7: 対処アクション分岐 ---
+    - name: Auto-execute restart action
       ansible.builtin.debug:
-        msg: >
-          [ACTION] restart_service: {{ ai_decision.action_params.target | default('unknown') }}
-          - {{ ai_decision.action_params.details | default('') }}
-          (PoC: dry-run mode)
+        msg: "ACTION: Would restart service {{ ai_decision.action_params.target }} (dry-run in PoC)"
       when:
         - ai_decision is defined
         - ai_decision.recommended_action == "restart_service"
-        - not (ai_decision.requires_human | default(true))
+        - not ai_decision.requires_human
+        - analysis_mode == "auto"
 
-    - name: Execute scale-out action
+    - name: Auto-execute disk cleanup
       ansible.builtin.debug:
-        msg: >
-          [ACTION] scale_out: {{ ai_decision.action_params.target | default('unknown') }}
-          - {{ ai_decision.action_params.details | default('') }}
-          (PoC: dry-run mode)
-      when:
-        - ai_decision is defined
-        - ai_decision.recommended_action == "scale_out"
-        - not (ai_decision.requires_human | default(true))
-
-    - name: Execute config adjustment
-      ansible.builtin.debug:
-        msg: >
-          [ACTION] adjust_config: {{ ai_decision.action_params.target | default('unknown') }}
-          - {{ ai_decision.action_params.details | default('') }}
-          (PoC: dry-run mode)
-      when:
-        - ai_decision is defined
-        - ai_decision.recommended_action == "adjust_config"
-        - not (ai_decision.requires_human | default(true))
-
-    - name: Execute disk cleanup
-      ansible.builtin.debug:
-        msg: >
-          [ACTION] disk_cleanup: {{ ai_decision.action_params.target | default('unknown') }}
-          - {{ ai_decision.action_params.details | default('') }}
-          (PoC: dry-run mode)
+        msg: "ACTION: Would clean up disk on {{ ai_decision.action_params.target }} (dry-run in PoC)"
       when:
         - ai_decision is defined
         - ai_decision.recommended_action == "disk_cleanup"
-        - not (ai_decision.requires_human | default(true))
+        - not ai_decision.requires_human
+        - analysis_mode == "auto"
+
+    - name: Auto-execute scale-out action
+      ansible.builtin.debug:
+        msg: "ACTION: Would scale out {{ ai_decision.action_params.target }} (dry-run in PoC)"
+      when:
+        - ai_decision is defined
+        - ai_decision.recommended_action == "scale_out"
+        - not ai_decision.requires_human
+        - analysis_mode == "auto"
+
+    - name: Await human approval (approval mode)
+      ansible.builtin.debug:
+        msg: |
+          APPROVAL MODE: Proposals posted to dashboard.
+          Operator must approve via dashboard at {{ dashboard_url }}/events/{{ dashboard_event_id }}
+      when:
+        - ai_decision is defined
+        - analysis_mode == "approval"
 
     - name: Escalate to human
       ansible.builtin.debug:
         msg: |
-          [ESCALATION] AI recommends human intervention
-          Severity:   {{ ai_decision.severity | default('unknown') }}
-          Reason:     {{ ai_decision.summary | default('See analysis') }}
-          Confidence: {{ ai_decision.confidence | default('N/A') }}
+          ESCALATION: AI recommends human intervention
+          Reason: {{ ai_decision.summary | default('See analysis') }}
       when:
         - ai_decision is defined
         - ai_decision.requires_human | default(true)
+        - analysis_mode == "auto"
 
-    # ---- Fallback ----
-    - name: No API key configured
+    - name: Fallback - no AI key configured
       ansible.builtin.debug:
-        msg: |
-          [WARNING] OPENAI_API_KEY not set. Skipping AI analysis.
-          Event logged only: {{ instana_event | to_nice_json }}
+        msg: "WARNING: OPENAI_API_KEY not set. Skipping AI analysis. Event logged only."
       when: openai_api_key | length == 0

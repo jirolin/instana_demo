@@ -1,4 +1,19 @@
 ---
+# Instana Event Routing Rulebook
+# ibm.instana コレクションの instana_webhook ソースを使用して
+# Instana からのイベントを受信し、条件に応じて対処する
+#
+# Instana Webhook ペイロード構造 (実測値):
+#   event.payload.issue.id          — イベントID
+#   event.payload.issue.text        — メッセージ本文
+#   event.payload.issue.severity    — 数値 (5=warning, 10=critical, -1=change)
+#   event.payload.issue.state       — "OPEN" / "CLOSED"
+#   event.payload.issue.entityLabel — ホスト名 (FQDN)
+#   event.payload.issue.entityType  — "Host" / "Application" 等
+#   event.payload.issue.service     — サービス名 ("not available" の場合あり)
+#   event.payload.issue.suggestion  — Instana推奨対処
+#   event.payload.issue.type        — "issue" / "incident" / "change"
+
 - name: Instana Event Driven Automation
   hosts: all
   sources:
@@ -7,52 +22,84 @@
         port: 5000
 
   rules:
-    # Test: log all events
+    # --- テスト用: 全イベントをログ出力 ---
     - name: Log all Instana events
       condition: event.payload is defined
       action:
         run_job_template:
           name: log-event
           organization: Default
-          job_args:
-            extra_vars:
-              event_payload: "{{ event.payload }}"
 
-    # Standard: process down -> restart
+    # --- Standard: プロセスダウン → 即時再起動 ---
     - name: Process down - restart service
-      condition: event.payload.message is match(".*process.*down.*", ignorecase=true)
+      condition: >
+        event.payload.issue is defined
+        and event.payload.issue.state == "OPEN"
+        and (
+          event.payload.issue.text is match(".*process.*down.*", ignorecase=true)
+          or event.payload.issue.text is match(".*offline.*", ignorecase=true)
+          or event.payload.issue.text is match(".*not responding.*", ignorecase=true)
+          or event.payload.issue.text is match(".*abnormal termination.*", ignorecase=true)
+        )
       action:
         run_job_template:
           name: restart-service
           organization: Default
           job_args:
             extra_vars:
-              target_host: "{{ event.payload.host }}"
-              service_name: "{{ event.payload.service }}"
-              event_id: "{{ event.payload.id }}"
+              target_host: "{{ event.payload.issue.entityLabel }}"
+              service_name: "{{ event.payload.issue.service }}"
+              event_id: "{{ event.payload.issue.id }}"
 
-    # Standard: disk usage high
+    # --- Standard: ディスク使用率高 → クリーンアップ ---
     - name: Disk usage high - cleanup
-      condition: event.payload.message is match(".*disk.*usage.*", ignorecase=true)
+      condition: >
+        event.payload.issue is defined
+        and event.payload.issue.state == "OPEN"
+        and event.payload.issue.text is match(".*disk.*usage.*", ignorecase=true)
       action:
         run_job_template:
           name: disk-cleanup
           organization: Default
           job_args:
             extra_vars:
-              target_host: "{{ event.payload.host }}"
+              target_host: "{{ event.payload.issue.entityLabel }}"
 
-    # AI-Driven: performance degradation
-    - name: Performance degradation - AI analysis
+    # --- AI-Driven: Warning (severity=5) + 性能系 → AI分析・自動対処 ---
+    - name: Performance degradation - AI analysis (auto)
       condition: >
-        event.payload.message is match(".*erroneous call rate.*", ignorecase=true)
-        or event.payload.message is match(".*response time.*", ignorecase=true)
-        or event.payload.message is match(".*high latency.*", ignorecase=true)
+        event.payload.issue is defined
+        and event.payload.issue.state == "OPEN"
+        and event.payload.issue.severity == 5
+        and (
+          event.payload.issue.text is match(".*erroneous call rate.*", ignorecase=true)
+          or event.payload.issue.text is match(".*response time.*", ignorecase=true)
+          or event.payload.issue.text is match(".*high latency.*", ignorecase=true)
+          or event.payload.issue.text is match(".*memory.*usage.*", ignorecase=true)
+          or event.payload.issue.text is match(".*system load.*", ignorecase=true)
+          or event.payload.issue.text is match(".*garbage collection.*", ignorecase=true)
+          or event.payload.issue.text is match(".*queue.*", ignorecase=true)
+        )
       action:
         run_job_template:
           name: ai-analyze-and-remediate
           organization: Default
           job_args:
             extra_vars:
-              event_data: "{{ event.payload }}"
+              event_data: "{{ event.payload.issue | to_json }}"
               analysis_mode: "auto"
+
+    # --- AI-Driven: Critical (severity=10) → AI分析・承認待ち ---
+    - name: Critical event - AI analysis (approval required)
+      condition: >
+        event.payload.issue is defined
+        and event.payload.issue.state == "OPEN"
+        and event.payload.issue.severity == 10
+      action:
+        run_job_template:
+          name: ai-analyze-and-remediate
+          organization: Default
+          job_args:
+            extra_vars:
+              event_data: "{{ event.payload.issue | to_json }}"
+              analysis_mode: "approval"
