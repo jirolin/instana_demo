@@ -58,9 +58,11 @@
           organization: Default
           job_args:
             extra_vars:
-              target_host: "{{ event.payload.issue.entityLabel }}"
+              target_host: "{{ event.payload.issue.fqdn }}"
+              entity_label: "{{ event.payload.issue.entityLabel }}"
               service_name: "{{ event.payload.issue.service }}"
               event_id: "{{ event.payload.issue.id }}"
+              event_text: "{{ event.payload.issue.text }}"
 
     # --- Standard: ディスク使用率高 → クリーンアップ ---
     - name: Disk usage high - cleanup
@@ -73,7 +75,8 @@
           organization: Default
           job_args:
             extra_vars:
-              target_host: "{{ event.payload.issue.entityLabel }}"
+              target_host: "{{ event.payload.issue.fqdn }}"
+              event_text: "{{ event.payload.issue.text }}"
 
     # --- AI-Driven: Warning (severity=5) + 性能系 → AI分析・自動対処 ---
     - name: Performance degradation - AI analysis (auto)
