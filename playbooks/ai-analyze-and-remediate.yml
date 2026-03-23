@@ -1,0 +1,161 @@
+---
+# AI判断 + 自動対処 Playbook
+# Instana イベントデータを ChatGPT API (gpt-4o) に送り、
+# 根本原因分析と最適な対処方針を取得して実行する
+- name: AI-Driven Analysis and Remediation
+  hosts: localhost
+  gather_facts: false
+  connection: local
+
+  vars:
+    event_data: "{{ event_data | default('{}') }}"
+    analysis_mode: "{{ analysis_mode | default('auto') }}"
+    openai_api_url: "https://api.openai.com/v1/chat/completions"
+    openai_api_key: "{{ lookup('env', 'OPENAI_API_KEY') }}"
+    openai_model: "gpt-4o"
+
+  tasks:
+    # ---- Phase 1: イベントデータ解析 ----
+    - name: Parse event data
+      ansible.builtin.set_fact:
+        instana_event: "{{ event_data if event_data is mapping else (event_data | from_json) }}"
+
+    - name: Log incoming event
+      ansible.builtin.debug:
+        msg: |
+          [AI-DRIVEN] Event received for analysis
+          Mode: {{ analysis_mode }}
+          Event: {{ instana_event | to_nice_json }}
+
+    # ---- Phase 2: ChatGPT API で根本原因分析 ----
+    - name: Send event to ChatGPT API for analysis
+      ansible.builtin.uri:
+        url: "{{ openai_api_url }}"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ openai_api_key }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          model: "{{ openai_model }}"
+          temperature: 0.2
+          response_format:
+            type: json_object
+          messages:
+            - role: system
+              content: |
+                あなたはインフラ運用のエキスパートです。
+                IBM Instana APMからのアラートを分析し、根本原因の特定と最適な対処方針を判断してください。
+                必ず以下のJSON形式で回答してください。
+            - role: user
+              content: |
+                以下のInstana APMアラートを分析してください。
+
+                ## アラート情報
+                {{ instana_event | to_nice_json }}
+
+                ## 回答フォーマット（JSON）
+                {
+                  "severity": "critical/high/medium/low",
+                  "root_cause": "根本原因の分析（日本語）",
+                  "recommended_action": "restart_service/scale_out/adjust_config/disk_cleanup/escalate",
+                  "action_params": {
+                    "target": "対象ホスト/サービス名",
+                    "details": "具体的な対処内容（日本語）"
+                  },
+                  "requires_human": true または false,
+                  "confidence": 0.0〜1.0,
+                  "summary": "状況サマリー（日本語、2-3文）"
+                }
+        return_content: true
+        status_code: 200
+        timeout: 30
+      register: ai_response
+      when: openai_api_key | length > 0
+
+    # ---- Phase 3: AI応答の解析 ----
+    - name: Parse AI response
+      ansible.builtin.set_fact:
+        ai_decision: "{{ ai_response.json.choices[0].message.content | from_json }}"
+      when: ai_response is defined and ai_response is not skipped
+
+    - name: Display AI analysis result
+      ansible.builtin.debug:
+        msg: |
+          ========================================
+          AI Analysis Result ({{ openai_model }})
+          ========================================
+          Severity:     {{ ai_decision.severity | default('unknown') }}
+          Root Cause:   {{ ai_decision.root_cause | default('N/A') }}
+          Action:       {{ ai_decision.recommended_action | default('N/A') }}
+          Target:       {{ ai_decision.action_params.target | default('N/A') }}
+          Details:      {{ ai_decision.action_params.details | default('N/A') }}
+          Confidence:   {{ ai_decision.confidence | default('N/A') }}
+          Human Needed: {{ ai_decision.requires_human | default(true) }}
+          Summary:      {{ ai_decision.summary | default('N/A') }}
+          ========================================
+      when: ai_decision is defined
+
+    # ---- Phase 4: AI判断に基づくアクション分岐 ----
+    - name: Execute restart action
+      ansible.builtin.debug:
+        msg: >
+          [ACTION] restart_service: {{ ai_decision.action_params.target | default('unknown') }}
+          - {{ ai_decision.action_params.details | default('') }}
+          (PoC: dry-run mode)
+      when:
+        - ai_decision is defined
+        - ai_decision.recommended_action == "restart_service"
+        - not (ai_decision.requires_human | default(true))
+
+    - name: Execute scale-out action
+      ansible.builtin.debug:
+        msg: >
+          [ACTION] scale_out: {{ ai_decision.action_params.target | default('unknown') }}
+          - {{ ai_decision.action_params.details | default('') }}
+          (PoC: dry-run mode)
+      when:
+        - ai_decision is defined
+        - ai_decision.recommended_action == "scale_out"
+        - not (ai_decision.requires_human | default(true))
+
+    - name: Execute config adjustment
+      ansible.builtin.debug:
+        msg: >
+          [ACTION] adjust_config: {{ ai_decision.action_params.target | default('unknown') }}
+          - {{ ai_decision.action_params.details | default('') }}
+          (PoC: dry-run mode)
+      when:
+        - ai_decision is defined
+        - ai_decision.recommended_action == "adjust_config"
+        - not (ai_decision.requires_human | default(true))
+
+    - name: Execute disk cleanup
+      ansible.builtin.debug:
+        msg: >
+          [ACTION] disk_cleanup: {{ ai_decision.action_params.target | default('unknown') }}
+          - {{ ai_decision.action_params.details | default('') }}
+          (PoC: dry-run mode)
+      when:
+        - ai_decision is defined
+        - ai_decision.recommended_action == "disk_cleanup"
+        - not (ai_decision.requires_human | default(true))
+
+    - name: Escalate to human
+      ansible.builtin.debug:
+        msg: |
+          [ESCALATION] AI recommends human intervention
+          Severity:   {{ ai_decision.severity | default('unknown') }}
+          Reason:     {{ ai_decision.summary | default('See analysis') }}
+          Confidence: {{ ai_decision.confidence | default('N/A') }}
+      when:
+        - ai_decision is defined
+        - ai_decision.requires_human | default(true)
+
+    # ---- Fallback ----
+    - name: No API key configured
+      ansible.builtin.debug:
+        msg: |
+          [WARNING] OPENAI_API_KEY not set. Skipping AI analysis.
+          Event logged only: {{ instana_event | to_nice_json }}
+      when: openai_api_key | length == 0
