@@ -99,7 +99,12 @@
           organization: Default
           job_args:
             extra_vars:
-              event_data: "{{ event.payload.issue | to_json }}"
+              event_id: "{{ event.payload.issue.id }}"
+              event_text: "{{ event.payload.issue.text }}"
+              event_severity: "{{ event.payload.issue.severity }}"
+              event_entity: "{{ event.payload.issue.entityLabel }}"
+              event_fqdn: "{{ event.payload.issue.fqdn }}"
+              event_service: "{{ event.payload.issue.service }}"
               analysis_mode: "auto"
 
     # --- AI-Driven: Critical (severity=10) → AI分析・承認待ち ---
@@ -114,7 +119,12 @@
           organization: Default
           job_args:
             extra_vars:
-              event_data: "{{ event.payload.issue | to_json }}"
+              event_id: "{{ event.payload.issue.id }}"
+              event_text: "{{ event.payload.issue.text }}"
+              event_severity: "{{ event.payload.issue.severity }}"
+              event_entity: "{{ event.payload.issue.entityLabel }}"
+              event_fqdn: "{{ event.payload.issue.fqdn }}"
+              event_service: "{{ event.payload.issue.service }}"
               analysis_mode: "approval"
 
     # --- Catch-all: 上記ルールにマッチしなかったイベントをログ出力 ---
